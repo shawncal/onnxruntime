@@ -207,7 +207,7 @@ The Dockerfile used in these instructions specifically targets Raspberry Pi 3/3+
 5. Note the full path of the `.whl` file
 
     - Reported at the end of the build, after the `# Build Output` line.
-    - It should follow the format `onnxruntime-0.3.0-cp35-cp35m-linux_armv7l.whl`, but version number may have changed. You'll use this path to extract the wheel file later.
+    - It should follow the format `onnxruntime-0.3.1-cp35-cp35m-linux_armv7l.whl`, but version number may have changed. You'll use this path to extract the wheel file later.
 6. Check that the build succeeded
 
     Upon completion, you should see an image tagged `onnxruntime-arm32v7` in your list of docker images:
@@ -219,11 +219,11 @@ The Dockerfile used in these instructions specifically targets Raspberry Pi 3/3+
     (Update the path/version of the `.whl` file with the one noted in step 5)
     ```bash
     docker create -ti --name onnxruntime_temp onnxruntime-arm32v7 bash
-    docker cp onnxruntime_temp:/code/onnxruntime/build/Linux/MinSizeRel/dist/onnxruntime-0.3.0-cp35-cp35m-linux_armv7l.whl .
+    docker cp onnxruntime_temp:/code/onnxruntime/build/Linux/MinSizeRel/dist/onnxruntime-0.3.1-cp35-cp35m-linux_armv7l.whl .
     docker rm -fv onnxruntime_temp
     ```
-    This will save a copy of the wheel file, `onnxruntime-0.3.0-cp35-cp35m-linux_armv7l.whl`, to your working directory on your host machine.
-8. Copy the wheel file (`onnxruntime-0.3.0-cp35-cp35m-linux_armv7l.whl`) to your Raspberry Pi or other ARM device
+    This will save a copy of the wheel file, `onnxruntime-0.3.1-cp35-cp35m-linux_armv7l.whl`, to your working directory on your host machine.
+8. Copy the wheel file (`onnxruntime-0.3.1-cp35-cp35m-linux_armv7l.whl`) to your Raspberry Pi or other ARM device
 9. On device, install the ONNX Runtime wheel file
     ```bash
     sudo apt-get update
@@ -232,7 +232,7 @@ The Dockerfile used in these instructions specifically targets Raspberry Pi 3/3+
 
     # Install ONNX Runtime
     # Important: Update path/version to match the name and location of your .whl file
-    pip3 install onnxruntime-0.3.0-cp35-cp35m-linux_armv7l.whl
+    pip3 install onnxruntime-0.3.1-cp35-cp35m-linux_armv7l.whl
     ```
 10. Test installation by following the instructions [here](https://microsoft.github.io/onnxruntime/)
 
@@ -281,19 +281,10 @@ sudo apt-get install -y \
 
 pip3 install --upgrade pip
 pip3 install --upgrade setuptools
-pip3 install --upgrade wheel
-pip3 install numpy
-
-# Build the latest cmake
-mkdir /code
-cd /code
-wget https://cmake.org/files/v3.12/cmake-3.12.3.tar.gz;
-tar zxf cmake-3.12.3.tar.gz
-
-cd /code/cmake-3.12.3
-./configure --system-curl
-make
-sudo make install
+pip3 install --index-url=https://www.piwheels.org/simple \
+    cmake \
+    numpy \
+    wheel
 
 # Prepare onnxruntime Repo
 cd /code
