@@ -19,6 +19,9 @@
 #include "core/optimizer/graph_transformer_level.h"
 #include "core/optimizer/graph_transformer_mgr.h"
 #include "core/optimizer/insert_cast_transformer.h"
+#ifdef ENABLE_LANGUAGE_INTEROP_OPS
+#include "core/language_interop_ops/language_interop_ops.h"
+#endif
 
 namespace onnxruntime {  // forward declarations
 class GraphTransformer;
@@ -53,6 +56,16 @@ struct SessionOptions {
   // enable profiling for this session.
   bool enable_profiling = false;
 
+  // non empty filepath enables serialization of the transformed optimized model to the specified filepath.
+  std::basic_string<ORTCHAR_T> optimized_model_filepath;
+
+  // enable the memory pattern optimization.
+  // The idea is if the input shapes are the same, we could trace the internal memory allocation
+  // and generate a memory pattern for future request. So next time we could just do one allocation
+  // with a big chunk for all the internal memory allocation.
+  // See class 'OrtValuePatternPlanner'.
+  bool enable_mem_pattern = true;
+
   // enable the memory arena on CPU
   // Arena may pre-allocate memory for future usage.
   // set this option to false if you don't want it.
@@ -61,8 +74,13 @@ struct SessionOptions {
   // the prefix of the profile file. The current time will be appended to the file name.
   std::basic_string<ORTCHAR_T> profile_file_prefix = ORT_TSTR("onnxruntime_profile_");
 
-  std::string session_logid;                 ///< logger id to use for session output
-  unsigned session_log_verbosity_level = 0;  ///< applies to session load, initialization, etc
+  std::string session_logid;  ///< logger id to use for session output
+
+  /// Log severity for the inference session. Applies to session load, initialization, etc.
+  /// See https://github.com/microsoft/onnxruntime/blob/master/include/onnxruntime/core/common/logging/severity.h
+  /// Default = -1 (use default logger severity)
+  int session_log_severity_level = -1;
+  int session_log_verbosity_level = 0;  ///< VLOG level if debug build and session_log_severity_level is 0 (VERBOSE).
 
   unsigned max_num_graph_transformation_steps = 5;  // TODO choose a good default here?
 
@@ -70,7 +88,7 @@ struct SessionOptions {
   TransformerLevel graph_optimization_level = TransformerLevel::Level1;
 
   // How many threads in the session thread pool.
-  int session_thread_pool_size = 0;
+  int session_thread_pool_size = -1;
 };
 
 /**
@@ -86,25 +104,25 @@ struct ModelMetadata {
 };
 
 /**
-  * @brief This is the main class used to Run a model.
-  * Sample simple usage:
-  *  CPUExecutionProviderInfo epi;
-  *  ProviderOption po{"CPUExecutionProvider", epi};
-  *  SessionOptions so(vector<ProviderOption>{po});
-  *  InferenceSession session_object{so};
-  *  common::Status status = session_object.Load(MODEL_URI);
-  *  common::Status status = session_object.Initialize();
-  *
-  *  NameMLValMap feeds;
-  *  feeds.insert({});
-  *  ...
-  *  std::vector<std::string> output_names;
-  *  output_names.insert(...);
-  *  ...
-  *  std::vector<MLValue> fetches;
-  *  common::Status status = session_object.Run(run_options, feeds, output_names, &fetches);
-  *  process the output here...
-  */
+ * @brief This is the main class used to Run a model.
+ * Sample simple usage:
+ *  CPUExecutionProviderInfo epi;
+ *  ProviderOption po{"CPUExecutionProvider", epi};
+ *  SessionOptions so(vector<ProviderOption>{po});
+ *  InferenceSession session_object{so};
+ *  common::Status status = session_object.Load(MODEL_URI);
+ *  common::Status status = session_object.Initialize();
+ *
+ *  NameMLValMap feeds;
+ *  feeds.insert({});
+ *  ...
+ *  std::vector<std::string> output_names;
+ *  output_names.insert(...);
+ *  ...
+ *  std::vector<OrtValue> fetches;
+ *  common::Status status = session_object.Run(run_options, feeds, output_names, &fetches);
+ *  process the output here...
+ */
 
 class InferenceSession {
  public:
@@ -125,7 +143,7 @@ class InferenceSession {
 
   /**
     * Register an execution provider. If you've one to register, call this before invoking Initialize().
-    * The order of invocation indicates the preference order as well. In other words call this method 
+    * The order of invocation indicates the preference order as well. In other words call this method
     * on your most preferred execution provider first followed by the less preferred ones.
     * Calling this API is optional in which case onnxruntime will use its internal CPU execution provider.
     * @return OK if success.
@@ -135,7 +153,7 @@ class InferenceSession {
   /**
     * Register a graph transformer. If you've one to register, call this before invoking Initialize().
     * Calling this API is optional.
-    * @param[in] - providers Optional. If providers is non-empty this transformer will only to 
+    * @param[in] - providers Optional. If providers is non-empty this transformer will only to
       applied to nodes which are assigned to given providers.
     * @param[in] - level Optional. Level to which this transformer should be registered. Default is set to 2.
     * @return OK if success.
@@ -151,14 +169,18 @@ class InferenceSession {
     */
   common::Status AddCustomTransformerList(const std::vector<std::string>& transformers_to_enable);
 
+  /**
+    * Add custom ops. This API is not thread safe.
+    */
   common::Status AddCustomOpDomains(const std::vector<OrtCustomOpDomain*>& ops);
 
   /**
-    * Register a custom registry for operator schema and kernels.  If you've one to register, 
+    * Register a custom registry for operator schema and kernels.  If you've one to register,
     * call this before invoking Initialize().
-    * The order of invocation indicates the reversed preference order: Register your most 
+    * The order of invocation indicates the reversed preference order: Register your most
     * preferred registry at the end.
     * Calling this API is optional.
+    * This API is not thread safe.
     * @return OK if success.
     */
   common::Status RegisterCustomRegistry(std::shared_ptr<CustomRegistry> custom_registry);
@@ -180,18 +202,25 @@ class InferenceSession {
   common::Status Load(std::istream& model_istream);
 
   /**
+    * Load an ONNX model.
+    * @param model_data Model data buffer
+    * @param model_data_len Model data buffer size
+    * @return OK if success.
+    */
+  common::Status Load(const void* model_data, int model_data_len);
+
+  /**
     * Initializes a previously loaded model. Initialization includes but is not
     * limited to graph transformations, construction of kernels, etc.
     * This method assumes that a method has been loaded previously.
+    * This API is thread-safe.
     * @return OK if success
     */
   common::Status Initialize();
 
-  common::Status Run(const RunOptions& run_options,
-                     const std::vector<std::string>& feed_names,
-                     const std::vector<MLValue>& feeds,
-                     const std::vector<std::string>& output_names,
-                     std::vector<MLValue>* p_fetches);
+  common::Status Run(const RunOptions& run_options, const std::vector<std::string>& feed_names,
+                     const std::vector<OrtValue>& feeds, const std::vector<std::string>& output_names,
+                     std::vector<OrtValue>* p_fetches);
 
   /**
     * Run a pre-loaded and pre-intialized model.
@@ -203,23 +232,20 @@ class InferenceSession {
     *        This should not be changed during execution of this function.
     * @return OK if success.
     */
-  common::Status Run(const NameMLValMap& feeds,
-                     const std::vector<std::string>& output_names,
-                     std::vector<MLValue>* p_fetches);
+  common::Status Run(const NameMLValMap& feeds, const std::vector<std::string>& output_names,
+                     std::vector<OrtValue>* p_fetches);
 
   /**
-    * See Run(const NameMLValMap& feeds, const std::vector<std::string>& output_names, std::vector<MLValue>* p_fetches)
-    * for details.
-    * @param run_options use this to tune the Run call to your needs.
-    */
-  common::Status Run(const RunOptions& run_options,
-                     const NameMLValMap& feeds,
-                     const std::vector<std::string>& output_names,
-                     std::vector<MLValue>* p_fetches);
+   * See Run(const NameMLValMap& feeds, const std::vector<std::string>& output_names, std::vector<OrtValue>* p_fetches)
+   * for details.
+   * @param run_options use this to tune the Run call to your needs.
+   */
+  common::Status Run(const RunOptions& run_options, const NameMLValMap& feeds,
+                     const std::vector<std::string>& output_names, std::vector<OrtValue>* p_fetches);
 
   /**
   * Creates a new binding object for binding inputs and outputs.
-  * @param provider_type specifies the location where the inputs need to be potentially copied. 
+  * @param provider_type specifies the location where the inputs need to be potentially copied.
   * See IOBinding class for more info.
   */
   common::Status NewIOBinding(std::unique_ptr<IOBinding>* io_binding);
@@ -254,9 +280,9 @@ class InferenceSession {
   int GetCurrentNumRuns() const;
 
   /**
-    * Start profiling on this inference session. This simply turns on profiling events to be 
+    * Start profiling on this inference session. This simply turns on profiling events to be
     * recorded. A corresponding EndProfiling has to follow to write profiling data to a file.
-    *@param file_prefix is the prefix of the profile file. It can include a directory path. 
+    *@param file_prefix is the prefix of the profile file. It can include a directory path.
     */
   void StartProfiling(const std::string& file_prefix);
 #ifdef _WIN32
@@ -302,12 +328,7 @@ class InferenceSession {
   // if they need.
   std::shared_ptr<onnxruntime::Model> model_;
 
-  // Immutable state for each op in the model. Shared by all executors.
-  SessionState session_state_;
-
-  // names of model inputs and outputs used for quick validation.
-  std::unordered_set<std::string> required_model_input_names_;
-  std::unordered_set<std::string> model_input_names_;
+  // names of model outputs used for quick validation.
   std::unordered_set<std::string> model_output_names_;
 
   // The file path of where the model was loaded. e.g. /tmp/test_squeezenet/model.onnx
@@ -345,17 +366,17 @@ class InferenceSession {
 
   void AddPredefinedTransformers(GraphTransformerManager& transformer_manager,
                                  TransformerLevel graph_optimization_level,
-                                 std::vector<std::string>& custom_list);
+                                 const std::vector<std::string>& custom_list);
 
   void InitLogger(logging::LoggingManager* logging_manager);
 
-  static common::Status CheckTypes(MLDataType actual, MLDataType expected);
+  common::Status CheckShapes(const std::string& input_name,
+                             const TensorShape& input_shape,
+                             const TensorShape& expected_shape) const;
 
-  common::Status ValidateInputs(const std::vector<std::string>& feed_names,
-                                const std::vector<MLValue>& feeds);
+  common::Status ValidateInputs(const std::vector<std::string>& feed_names, const std::vector<OrtValue>& feeds) const;
 
-  common::Status ValidateOutputs(const std::vector<std::string>& output_names,
-                                 const std::vector<MLValue>* p_fetches);
+  common::Status ValidateOutputs(const std::vector<std::string>& output_names, const std::vector<OrtValue>* p_fetches) const;
 
   common::Status WaitForNotification(Notification* p_executor_done, int64_t timeout_in_ms);
 
@@ -375,16 +396,27 @@ class InferenceSession {
   std::vector<std::string> transformers_to_enable_;
 
   /// Logging manager if provided.
-  logging::LoggingManager* logging_manager_;
+  logging::LoggingManager* logging_manager_ = nullptr;
 
   /// Logger for this session. WARNING: Will contain nullptr if logging_manager_ is nullptr.
-  std::unique_ptr<logging::Logger> owned_session_logger_;
+  std::unique_ptr<logging::Logger> owned_session_logger_ = nullptr;
 
   // Profiler for this session.
   profiling::Profiler session_profiler_;
 
+  // The list of execution providers.
   ExecutionProviders execution_providers_;
 
+ private:
+  // Threadpool for this session
+  std::unique_ptr<onnxruntime::concurrency::ThreadPool> thread_pool_;
+
+ protected:
+  // Immutable state for each op in the model. Shared by all executors.
+  // It has a dependency on execution_providers_.
+  SessionState session_state_;
+
+ private:
   KernelRegistryManager kernel_registry_manager_;
   std::list<std::shared_ptr<onnxruntime::IOnnxRuntimeOpSchemaCollection>> custom_schema_registries_;
 
@@ -392,22 +424,21 @@ class InferenceSession {
   std::vector<std::unique_ptr<IExecutor>> executors_;  // TODO do we need this vector?
 
   ModelMetadata model_metadata_;
-  InputDefList required_input_def_list_;
-  std::unordered_map<std::string, const NodeArg*> input_def_map_;
+  std::unordered_set<std::string> required_inputs_;
+
+  struct InputDefMetaData {
+    InputDefMetaData(const NodeArg* node_arg0, MLDataType ml_data_type0, TensorShape&& tensor_shape0)
+        : node_arg(node_arg0), ml_data_type(ml_data_type0), tensor_shape(std::move(tensor_shape0)) {
+    }
+    const NodeArg* node_arg;
+    MLDataType ml_data_type;
+    TensorShape tensor_shape;  // not applicable if the input is non-tensor type
+  };
+  std::unordered_map<std::string, InputDefMetaData> input_def_map_;
   OutputDefList output_def_list_;
 
-// Environment for this session
-// not used now; we'll need it when we introduce threadpool
-// statically allocated pointer, no need to manage its lifetime.
-//Env* env_;
-
-// Threadpool for this session
-//thread::ThreadPool thread_pool_; // not used for now; will add it later when implementing RunAsync
-#ifdef USE_EIGEN_THREADPOOL
-  std::unique_ptr<Eigen::NonBlockingThreadPool> thread_pool_;
-#else
-  std::unique_ptr<TaskThreadPool> thread_pool_;
-#endif
+  // Data transfer manager.
+  DataTransferManager data_transfer_mgr_;
 
   // Number of concurrently running executors
   std::atomic<int> current_num_runs_;
@@ -417,5 +448,13 @@ class InferenceSession {
   bool is_inited_ = false;                       // GUARDED_BY(session_mutex_)
 
   InsertCastTransformer insert_cast_transformer_;
+
+  //CustomRegistry objects own the corresponding KernelRegistry and OnnxRuntimeOpSchemaRegistry objects.
+  //So its lifetime should be same as its constituents. This vector is to extend the lifetime of the owner.
+  std::vector<std::shared_ptr<CustomRegistry>> custom_registries_;
+
+#ifdef ENABLE_LANGUAGE_INTEROP_OPS
+  InterOpDomains interop_domains_;
+#endif
 };
 }  // namespace onnxruntime

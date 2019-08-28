@@ -91,18 +91,22 @@ Status ForceSingleNodeCPUFloat16ToFloat32(onnxruntime::Graph& graph) {
   return Status::OK();
 }
 
+/** Transformer to remove duplicate Cast nodes. */
 class RemoveDuplicateCastTransformer : public GraphTransformer {
  public:
-  RemoveDuplicateCastTransformer() : GraphTransformer("RemoveDuplicateCastTransformer",
-                                                      "Transformer to remove duplicate Cast nodes.") {
+  RemoveDuplicateCastTransformer() : GraphTransformer("RemoveDuplicateCastTransformer") {
   }
 
  private:
   Status ApplyImpl(Graph& graph, bool& modified, int graph_level) const override {
-
     std::map<const onnxruntime::NodeArg*, onnxruntime::NodeArg*> replacement_defs;
     std::vector<onnxruntime::NodeIndex> removed_nodes;
     for (auto& node : graph.Nodes()) {
+      if (std::find(removed_nodes.cbegin(), removed_nodes.cend(), node.Index()) != removed_nodes.cend()) {
+        // node has already been marked for removal, and any following node updated so we need to ignore it here
+        continue;
+      }
+
       if (node.OpType() == "Cast") {
         // if cast's next node is also cast and next cast's output type equal to cast's input type
         // remove those two cast.
@@ -118,9 +122,9 @@ class RemoveDuplicateCastTransformer : public GraphTransformer {
         for (auto it = node.OutputNodesBegin(); it != node.OutputNodesEnd(); ++it) {
           const Node& output_node{*it};
           if (output_node.OpType() == "Cast") {
-            // Skip if the node's output is also the output of the graph
+            // Skip this child node if this child node's output is also an output of the graph
             if (graph_outputs.find(output_node.OutputDefs()[0]) != graph_outputs.end()) {
-              break;
+              continue;
             }
             auto src_type1 = output_node.InputDefs()[0]->Type();
             auto dst_type1 = output_node.OutputDefs()[0]->Type();
@@ -138,7 +142,9 @@ class RemoveDuplicateCastTransformer : public GraphTransformer {
           num_child++;
         }
 
-        if (child_removed == num_child && child_removed > 0) {
+        if (child_removed == num_child &&
+            child_removed > 0 &&
+            graph_outputs.find(node.OutputDefs()[0]) == graph_outputs.end()) {
           removed_nodes.push_back(node.Index());
         }
       }
@@ -156,13 +162,13 @@ class RemoveDuplicateCastTransformer : public GraphTransformer {
 };
 
 Status InsertCastTransformer::ApplyImpl(onnxruntime::Graph& graph, bool& modified, int graph_level) const {
-
   if (force_cpu_fp32_)
     ORT_RETURN_IF_ERROR(ForceSingleNodeCPUFloat16ToFloat32(graph));
 
   GraphViewer graph_viewer(graph);
   auto& order = graph_viewer.GetNodesInTopologicalOrder();
-  TypeProto float_16_tensor_proto, float_tensor_proto;
+  TypeProto float_16_tensor_proto;
+  TypeProto float_tensor_proto;
   float_16_tensor_proto.mutable_tensor_type()->set_elem_type(TensorProto_DataType_FLOAT16);
   float_tensor_proto.mutable_tensor_type()->set_elem_type(TensorProto_DataType_FLOAT);
   IdGenerator id_generator;
@@ -238,7 +244,7 @@ Status InsertCastTransformer::ApplyImpl(onnxruntime::Graph& graph, bool& modifie
     if (modified) {
       ORT_RETURN_IF_ERROR(graph.Resolve());
     }
-    
+
     RemoveDuplicateCastTransformer remover;
     // RemoveDuplicateCastTransformer is a special transformer required for correctness.
     // It is provider agnostic so simply send an empty vector.

@@ -21,7 +21,9 @@ Tensor::Tensor(MLDataType p_type, const TensorShape& shape, std::shared_ptr<IAll
   int64_t shape_size = shape.Size();
   if (shape_size < 0 || static_cast<uint64_t>(shape_size) >= std::numeric_limits<size_t>::max())
     ORT_THROW("shape.Size() must >=0");
-  void* p_data = allocator->AllocArray(static_cast<size_t>(shape_size), p_type->Size());
+  void* p_data = nullptr;
+  if(shape_size > 0)
+     p_data = allocator->AllocArray(static_cast<size_t>(shape_size), p_type->Size());
   Init(p_type, shape, p_data, allocator, offset);
 }
 
@@ -45,7 +47,7 @@ void Tensor::Init(MLDataType p_type, const TensorShape& shape, void* p_raw_data,
   byte_offset_ = offset;
 }
 
-Tensor::Tensor(Tensor&& other)
+Tensor::Tensor(Tensor&& other) noexcept
     : p_data_(other.p_data_),
       buffer_deleter_(other.buffer_deleter_),
       shape_(other.shape_),
@@ -59,7 +61,7 @@ Tensor::Tensor(Tensor&& other)
   other.byte_offset_ = 0;
 }
 
-Tensor& Tensor::operator=(Tensor&& other) {
+Tensor& Tensor::operator=(Tensor&& other) noexcept {
   if (this != &other) {
     ReleaseBuffer();
 

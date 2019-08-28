@@ -176,10 +176,34 @@ class OpTester {
     AddData(input_data_, name, dims, values.data(), values.size(), is_initializer);
   }
 
+  // Add other registered types, possibly experimental
+  template <typename T>
+  void AddInput(const char* name, const T& val) {
+    auto mltype = DataTypeImpl::GetType<T>();
+    ORT_ENFORCE(mltype != nullptr, "T must be a registered cpp type");
+    auto ptr = std::make_unique<T>(val);
+    OrtValue value;
+    value.Init(ptr.get(), mltype, mltype->GetDeleteFunc());
+    ptr.release();
+    input_data_.push_back({{name, mltype->GetTypeProto()}, value, optional<float>(), optional<float>()});
+  }
+
+  template <typename T>
+  void AddInput(const char* name, T&& val) {
+    auto mltype = DataTypeImpl::GetType<T>();
+    ORT_ENFORCE(mltype != nullptr, "T must be a registered cpp type");
+    auto ptr = std::make_unique<T>(std::move(val));
+    OrtValue value;
+    value.Init(ptr.get(), mltype, mltype->GetDeleteFunc());
+    ptr.release();
+    input_data_.push_back({{name, mltype->GetTypeProto()}, value, optional<float>(), optional<float>()});
+  }
+
+
   template <typename TKey, typename TVal>
   void AddInput(const char* name, const std::map<TKey, TVal>& val) {
     std::unique_ptr<std::map<TKey, TVal>> ptr = std::make_unique<std::map<TKey, TVal>>(val);
-    MLValue value;
+    OrtValue value;
     value.Init(ptr.release(),
                DataTypeImpl::GetType<std::map<TKey, TVal>>(),
                DataTypeImpl::GetType<std::map<TKey, TVal>>()->GetDeleteFunc());
@@ -208,11 +232,34 @@ class OpTester {
     output_data_.push_back({{name, &s_type_proto<T>}, {}, optional<float>(), optional<float>()});
   }
 
+  // Add other registered types, possibly experimental
+  template <typename T>
+  void AddOutput(const char* name, const T& val) {
+    auto mltype = DataTypeImpl::GetType<T>();
+    ORT_ENFORCE(mltype != nullptr, "T must be a registered cpp type");
+    auto ptr = std::make_unique<T>(val);
+    OrtValue value;
+    value.Init(ptr.get(), mltype, mltype->GetDeleteFunc());
+    ptr.release();
+    output_data_.push_back({{name, mltype->GetTypeProto()}, value, optional<float>(), optional<float>()});
+  }
+
+  template <typename T>
+  void AddOutput(const char* name, T&& val) {
+    auto mltype = DataTypeImpl::GetType<T>();
+    ORT_ENFORCE(mltype != nullptr, "T must be a registered cpp type");
+    auto ptr = std::make_unique<T>(std::move(val));
+    OrtValue value;
+    value.Init(ptr.get(), mltype, mltype->GetDeleteFunc());
+    ptr.release();
+    output_data_.push_back({{name, mltype->GetTypeProto()}, value, optional<float>(), optional<float>()});
+  }
+
   // Add non tensor output
   template <typename TKey, typename TVal>
   void AddOutput(const char* name, const std::vector<std::map<TKey, TVal>>& val) {
     auto ptr = std::make_unique<std::vector<std::map<TKey, TVal>>>(val);
-    MLValue ml_value;
+    OrtValue ml_value;
     ml_value.Init(ptr.release(),
                   DataTypeImpl::GetType<std::vector<std::map<TKey, TVal>>>(),
                   DataTypeImpl::GetType<std::vector<std::map<TKey, TVal>>>()->GetDeleteFunc());
@@ -220,13 +267,19 @@ class OpTester {
   }
 
   void AddCustomOpRegistry(std::shared_ptr<CustomRegistry> registry) {
-    // need to do some static casting so we can easily use this later
-    custom_schema_registries_.push_back(std::static_pointer_cast<IOnnxRuntimeOpSchemaCollection>(registry));
-    custom_session_registries_.push_back(std::static_pointer_cast<CustomRegistry>(registry));
+    custom_schema_registries_.push_back(registry->GetOpschemaRegistry());
+    custom_session_registries_.push_back(registry);
   }
 
   void SetOutputAbsErr(const char* name, float v);
   void SetOutputRelErr(const char* name, float v);
+
+  // Number of times to call InferenceSession::Run. The same feeds are used each time.
+  // e.g. used to verify the generator ops behave as expected
+  void SetNumRunCalls(int n) {
+    ORT_ENFORCE(n > 0);
+    num_run_calls_ = n;
+  }
 
   template <typename T>
   void AddAttribute(std::string name, T value) {
@@ -243,11 +296,12 @@ class OpTester {
   void Run(ExpectResult expect_result = ExpectResult::kExpectSuccess, const std::string& expected_failure_string = "",
            const std::unordered_set<std::string>& excluded_provider_types = {},
            const RunOptions* run_options = nullptr,
-           std::vector<std::unique_ptr<IExecutionProvider>>* execution_providers = nullptr);
+           std::vector<std::unique_ptr<IExecutionProvider>>* execution_providers = nullptr,
+           bool sequential_execution = true);
 
   struct Data {
     onnxruntime::NodeArg def_;
-    MLValue data_;
+    OrtValue data_;
     optional<float> relative_error_;
     optional<float> absolute_error_;
   };
@@ -260,7 +314,7 @@ class OpTester {
 
   void AddInitializers(onnxruntime::Graph& graph);
 
-  void FillFeedsAndOutputNames(std::unordered_map<std::string, MLValue>& feeds,
+  void FillFeedsAndOutputNames(std::unordered_map<std::string, OrtValue>& feeds,
                                std::vector<std::string>& output_names);
 
   std::unique_ptr<onnxruntime::Model> BuildGraph();
@@ -298,7 +352,7 @@ class OpTester {
       }
 
       TTypeProto<T> type_proto(add_shape_to_tensor_data_ ? &dims_for_proto : nullptr);
-      MLValue value;
+      OrtValue value;
       value.Init(p_tensor.release(), DataTypeImpl::GetType<Tensor>(), DataTypeImpl::GetType<Tensor>()->GetDeleteFunc());
       data.push_back({{name, &type_proto}, value, optional<float>(), optional<float>()});
       if (is_initializer)
@@ -309,19 +363,16 @@ class OpTester {
     }
   }
 
-  void ExecuteModel(Model& model,
-                    InferenceSession& session_object,
-                    ExpectResult expect_result,
-                    const std::string& expected_failure_string,
-                    const RunOptions* run_options,
-                    std::unordered_map<std::string, MLValue> feeds,
-                    std::vector<std::string> output_names,
+  void ExecuteModel(Model& model, InferenceSession& session_object, ExpectResult expect_result,
+                    const std::string& expected_failure_string, const RunOptions* run_options,
+                    std::unordered_map<std::string, OrtValue> feeds, std::vector<std::string> output_names,
                     const std::string& provider_type);
 
   const char* domain_;
   int opset_version_;
   bool add_shape_to_tensor_data_ = true;
   int add_symbolic_dim_to_tensor_data_ = -1;
+  int num_run_calls_ = 1;
   std::vector<Data> input_data_;
   std::vector<Data> output_data_;
   std::vector<size_t> initializer_index_;

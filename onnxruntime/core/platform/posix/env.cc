@@ -41,17 +41,7 @@ namespace onnxruntime {
 namespace {
 constexpr int OneMillion = 1000000;
 
-class StdThread : public Thread {
- public:
-  StdThread(std::function<void()> fn)
-      : thread_(fn) {}
-  ~StdThread() override { thread_.join(); }
-
- private:
-  std::thread thread_;
-};
-
-static void ORT_API_CALL DeleteBuffer(void* param) noexcept { ::free(param); }
+static void DeleteBuffer(void* param) noexcept { ::free(param); }
 
 class UnmapFileParam {
  public:
@@ -60,7 +50,7 @@ class UnmapFileParam {
   int fd;
 };
 
-static void ORT_API_CALL UnmapFile(void* param) noexcept {
+static void UnmapFile(void* param) noexcept {
   UnmapFileParam* p = reinterpret_cast<UnmapFileParam*>(param);
   int ret = munmap(p->addr, p->len);
   if (ret != 0) {
@@ -85,13 +75,6 @@ class PosixEnv : public Env {
     return std::thread::hardware_concurrency();
   }
 
-  EnvThread* CreateThread(std::function<void()> fn) const override { return new StdThread(fn); }
-
-  Task CreateTask(std::function<void()> f) const override {
-    return Task{std::move(f)};
-  }
-  void ExecuteTask(const Task& t) const override { t.f(); }
-
   void SleepForMicroseconds(int64_t micros) const override {
     while (micros > 0) {
       timespec sleep_time;
@@ -110,11 +93,6 @@ class PosixEnv : public Env {
         // Ignore signals and wait for the full interval to elapse.
       }
     }
-  }
-
-  Thread* StartThread(const ThreadOptions& /*thread_options*/, const std::string& /*name*/,
-                      std::function<void()> fn) const override {
-    return new StdThread(fn);
   }
 
   PIDType GetSelfPid() const override {
@@ -145,18 +123,8 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
-  static bool GetFileSizeIfUnknown(int fd, size_t& len) {
-    if(len > 0) return true;
-    struct stat stbuf;
-    if ((fstat(fd, &stbuf) != 0) || (!S_ISREG(stbuf.st_mode))) {
-      return false;
-    }
-    len = static_cast<size_t>(stbuf.st_size);
-    return true;
-  }
-
   common::Status ReadFileAsString(const char* fname, off_t offset, void*& p, size_t& len,
-      OrtCallback& deleter) const override {
+                                  OrtCallback& deleter) const override {
     if (!fname) {
       return common::Status(common::ONNXRUNTIME, common::INVALID_ARGUMENT, "ReadFileAsString: 'fname' cannot be NULL");
     }
@@ -169,13 +137,21 @@ class PosixEnv : public Env {
     deleter.param = nullptr;
     int fd = open(fname, O_RDONLY);
     if (fd < 0) {
-      int err = errno;
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "open file ", fname, " fail, errcode =", err);
+      return ReportSystemError("open", fname);
     }
-    if (!GetFileSizeIfUnknown(fd, len)) {
-      (void)close(fd);
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Get file '", fname, "' size fail");
+    if (len <= 0) {
+      struct stat stbuf;
+      if (fstat(fd, &stbuf) != 0) {
+        return ReportSystemError("fstat", fname);
+      }
+
+      if (!S_ISREG(stbuf.st_mode)) {
+        return common::Status(common::ONNXRUNTIME, common::INVALID_ARGUMENT,
+                              "ReadFileAsString: input is not a regular file");
+      }
+      len = static_cast<size_t>(stbuf.st_size);
     }
+
     if (len == 0) {
       p = nullptr;
     } else {
@@ -199,10 +175,30 @@ class PosixEnv : public Env {
     return common::Status::OK();
   }
 
+  static common::Status ReportSystemError(const char* operation_name, const std::string& path) {
+    auto e = errno;
+    char buf[1024];
+    const char* msg = "";
+    if (e > 0) {
+#if defined(__GLIBC__) && defined(_GNU_SOURCE) && !defined(__ANDROID__)
+      msg = strerror_r(e, buf, sizeof(buf));
+#else
+      // for Mac OS X and Android lower than API 23
+      if (strerror_r(e, buf, sizeof(buf)) != 0) {
+        buf[0] = '\0';
+      }
+      msg = buf;
+#endif
+    }
+    std::ostringstream oss;
+    oss << operation_name << " file \"" << path << "\" failed: " << msg;
+    return common::Status(common::SYSTEM, e, oss.str());
+  }
+
   common::Status FileOpenRd(const std::string& path, /*out*/ int& fd) const override {
     fd = open(path.c_str(), O_RDONLY);
     if (0 > fd) {
-      return common::Status(common::SYSTEM, errno);
+      return ReportSystemError("open", path);
     }
     return Status::OK();
   }
@@ -210,7 +206,7 @@ class PosixEnv : public Env {
   common::Status FileOpenWr(const std::string& path, /*out*/ int& fd) const override {
     fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (0 > fd) {
-      return common::Status(common::SYSTEM, errno);
+      return ReportSystemError("open", path);
     }
     return Status::OK();
   }
@@ -218,7 +214,7 @@ class PosixEnv : public Env {
   common::Status FileClose(int fd) const override {
     int ret = close(fd);
     if (0 != ret) {
-      return common::Status(common::SYSTEM, errno);
+      return ReportSystemError("close", "");
     }
     return Status::OK();
   }

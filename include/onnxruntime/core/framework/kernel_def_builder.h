@@ -19,15 +19,15 @@ class KernelDefBuilder;
 
 typedef std::map<size_t, OrtMemType> MemTypeMap;
 
-// note that input/output might be on CPU implicitly when the node is from CPU execution provider
-inline bool MemTypeOnCpuExplicitly(OrtMemType mem_type) {
-  return mem_type == OrtMemTypeCPUInput || mem_type == OrtMemTypeCPUOutput;
-}
-
 class KernelDef {
- public:
-  explicit KernelDef() {
+ private:
+  // note that input/output might be on CPU implicitly when the node is from CPU execution provider
+  static inline bool MemTypeOnCpuExplicitly(OrtMemType mem_type) {
+    return mem_type == OrtMemTypeCPUInput || mem_type == OrtMemTypeCPUOutput;
   }
+
+ public:
+  explicit KernelDef() = default;
 
   const std::string& OpName() const {
     return op_name_;
@@ -41,6 +41,12 @@ class KernelDef {
     *start = op_since_version_start_;
     *end = op_since_version_end_;
   }
+
+#ifdef onnxruntime_PYBIND_EXPORT_OPSCHEMA
+  const std::pair<int, int> SinceVersion() const {
+    return std::pair<int, int>(op_since_version_start_, op_since_version_end_);
+  }
+#endif
 
   onnxruntime::ProviderType Provider() const {
     return provider_type_;
@@ -64,6 +70,10 @@ class KernelDef {
       return default_inputs_mem_type_;
     return it->second;
   }
+
+  bool IsInputOnCpu(size_t input_index) const { return MemTypeOnCpuExplicitly(InputMemoryType(input_index)); }
+
+  bool IsOutputOnCpu(size_t output_index) const { return MemTypeOnCpuExplicitly(OutputMemoryType(output_index)); }
 
   OrtMemType OutputMemoryType(size_t output_index) const {
     auto it = output_memory_type_args_.find(output_index);
